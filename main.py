@@ -1,46 +1,56 @@
 import os
 import time
+import json
 import requests
 import yfinance as yf
 import pandas as pd
+from flask import Flask, request
+from threading import Thread
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
+from keep_alive import keep_alive
 
 # ==== CONFIG ====
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")  # fallback for manual testing
 features = ['RSI', 'EMA9', 'EMA21', 'MACD', 'MACD_Signal']
-assets = [
-    'BTC-USD', 'ETH-USD', 'SOL-USD',
-    'TSLA', 'NVDA', 'META', 'AAPL',
-    'GC=F', 'CL=F',
-    'GBPJPY=X', 'EURUSD=X', 'USDJPY=X'
-]
-
+assets = {
+    'crypto': ['BTC-USD', 'ETH-USD', 'SOL-USD'],
+    'stocks': ['TSLA', 'NVDA', 'META', 'AAPL'],
+    'commodities': ['GC=F', 'CL=F'],
+    'forex': ['GBPJPY=X', 'EURUSD=X', 'USDJPY=X']
+}
 interval_minutes = 30
 last_signals = {}
+models = {}
 
-print("✅ Bot has started successfully.")
+# ==== Flask Web Server ====
+app = Flask(__name__)
 
-# ==== FUNCTIONS ====
+@app.route('/')
+def home():
+    return "✅ Bot is running."
 
-def send_telegram_message(message):
+@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=['POST'])
+def telegram_webhook():
+    data = request.get_json()
+    if "message" in data and "text" in data["message"]:
+        chat_id = data["message"]["chat"]["id"]
+        text = data["message"]["text"]
+        handle_command(text, chat_id)
+    return "ok", 200
+
+def send_telegram_message(message, chat_id=TELEGRAM_CHAT_ID):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    data = {'chat_id': TELEGRAM_CHAT_ID, 'text': message}
-    try:
-        response = requests.post(url, data=data)
-        if response.status_code != 200:
-            print(f"⚠️ Telegram Error: {response.text}")
-    except Exception as e:
-        print(f"❌ Telegram Failed: {e}")
+    data = {'chat_id': chat_id, 'text': message}
+    requests.post(url, data=data)
 
+# ==== Trading Logic ====
 def fetch_data(ticker):
-    long_assets = ['GC=F', 'CL=F', 'USOIL']
+    long_assets = ['GC=F', 'CL=F']
     period = '30d' if ticker in long_assets else '7d'
     df = yf.download(ticker, interval='15m', period=period, auto_adjust=True)
     if df.empty or len(df) < 100:
-        print(f"⚠️ No data for {ticker}")
         return pd.DataFrame()
     df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
     df.columns = ['open', 'high', 'low', 'close', 'volume']
@@ -66,72 +76,96 @@ def label_data(df):
     df['Target'] = (df['Future_Close'] > df['close']).astype(int)
     return df
 
-def train_model(df):
+def train_model_for(ticker):
+    df = fetch_data(ticker)
+    if df.empty:
+        return None
+    df = compute_indicators(df)
+    df = label_data(df)
     X = df[features]
     y = df['Target']
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     model = RandomForestClassifier(n_estimators=100)
-    model.fit(X_train, y_train)
-    return model
+    model.fit(X, y)
+    return model, df
 
-def get_signal(model, df):
+def get_prediction(model, df):
     latest = df.iloc[-1:]
-    return "✅ BUY" if model.predict(latest[features])[0] == 1 else "❌ SELL"
-
-# ==== MAIN LOOP ====
-while True:
-    print(f"🔁 Checking signals at {time.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-    for asset in assets:
-        try:
-            df = fetch_data(asset)
-            if df.empty:
-                continue
-            df = compute_indicators(df)
-            df = label_data(df)
-            model = train_model(df)
-            signal = get_signal(model, df)
-
-            # ✅ Signal Filtering Logic
-            confidence_raw = model.predict_proba(df.iloc[[-1]][features])[0][1]
-            direction = "📈 UP" if confidence_raw >= 0.5 else "📉 DOWN"
-            confidence_final = confidence_raw if confidence_raw >= 0.5 else 1 - confidence_raw
-
-            if confidence_final < 0.75:
-                print(f"🔕 Skipping {asset}: Confidence too low ({confidence_final:.0%})")
-                continue
-
-            if asset in last_signals and last_signals[asset] == signal:
-                print(f"🔁 Skipping {asset}: No signal change ({signal})")
-                continue
-
-            last_signals[asset] = signal  # Update memory
-
-            # 💬 Build and send the Telegram message
-            latest_price = df['close'].iloc[-1]
-            rsi = round(df['RSI'].iloc[-1], 2)
-            macd = round(df['MACD'].iloc[-1], 4)
-            macd_signal = round(df['MACD_Signal'].iloc[-1], 4)
-            trend = "📈 Bullish" if macd > macd_signal else "📉 Bearish"
-
-            message = f"""
+    confidence_raw = model.predict_proba(latest[features])[0][1]
+    signal = "✅ BUY" if confidence_raw >= 0.5 else "❌ SELL"
+    direction = "📈 UP" if confidence_raw >= 0.5 else "📉 DOWN"
+    confidence_final = confidence_raw if confidence_raw >= 0.5 else 1 - confidence_raw
+    rsi = round(latest['RSI'].values[0], 2)
+    macd = round(latest['MACD'].values[0], 4)
+    macd_signal = round(latest['MACD_Signal'].values[0], 4)
+    price = round(latest['close'].values[0], 2)
+    trend = "📈 Bullish" if macd > macd_signal else "📉 Bearish"
+    return f"""
 📊 Signal: {signal}
-Asset: {asset}
 Direction: {direction}
 Model Confidence: {confidence_final:.0%}
-Price: ${latest_price:,.2f}
+Price: ${price:,.2f}
 Trend: {trend}
 RSI: {rsi}
-📅 Timestamp: {time.strftime('%Y-%m-%d %H:%M UTC')}
 """
-            print(message.strip())
-            send_telegram_message(message.strip())
 
-        except Exception as e:
-            error_msg = f"⚠️ Error with {asset}: {e}"
-            print(error_msg)
-            send_telegram_message(error_msg)
+# ==== Command Handler ====
+def handle_command(text, chat_id):
+    text = text.strip().lower()
 
-    print(f"🕒 Sleeping for {interval_minutes} minutes...\n")
-    time.sleep(interval_minutes * 60)
+    if text.startswith("/crypto"):
+        for sym in assets['crypto']:
+            model, df = train_model_for(sym)
+            if model: msg = f"📈 {sym}\n{get_prediction(model, df)}"
+            else: msg = f"⚠️ No data for {sym}"
+            send_telegram_message(msg, chat_id)
 
+    elif text.startswith("/stocks"):
+        for sym in assets['stocks']:
+            model, df = train_model_for(sym)
+            if model: msg = f"📈 {sym}\n{get_prediction(model, df)}"
+            else: msg = f"⚠️ No data for {sym}"
+            send_telegram_message(msg, chat_id)
 
+    elif text.startswith("/commodities"):
+        for sym in assets['commodities']:
+            model, df = train_model_for(sym)
+            if model: msg = f"🛢️ {sym}\n{get_prediction(model, df)}"
+            else: msg = f"⚠️ No data for {sym}"
+            send_telegram_message(msg, chat_id)
+
+    elif text.startswith("/info"):
+        parts = text.split()
+        if len(parts) >= 2:
+            sym = parts[1].upper()
+            model, df = train_model_for(sym)
+            if model:
+                msg = f"📊 {sym} Info\n{get_prediction(model, df)}"
+            else:
+                msg = f"⚠️ No data available for {sym}"
+            send_telegram_message(msg, chat_id)
+        else:
+            send_telegram_message("⚠️ Usage: /info <symbol>", chat_id)
+
+    else:
+        send_telegram_message("🤖 Commands:\n/crypto\n/stocks\n/commodities\n/info <symbol>", chat_id)
+
+# ==== Background Worker (optional) ====
+def background_refresh():
+    while True:
+        print("🔄 Background refresh running...")
+        all_symbols = sum(assets.values(), [])
+        for symbol in all_symbols:
+            try:
+                model, df = train_model_for(symbol)
+                if model:
+                    models[symbol] = (model, df)
+                    print(f"✅ Updated model for {symbol}")
+            except Exception as e:
+                print(f"⚠️ Error refreshing {symbol}: {e}")
+        print(f"⏳ Sleeping for {interval_minutes} mins...\n")
+        time.sleep(interval_minutes * 60)
+
+# ==== RUN ====
+keep_alive()
+Thread(target=background_refresh).start()
+app.run(host='0.0.0.0', port=8080)
