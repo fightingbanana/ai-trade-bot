@@ -5,6 +5,11 @@ import requests
 import yfinance as yf
 import pandas as pd
 from flask import Flask, request
+app = Flask(__name__)  # ✅ Make sure this is before any @app.route
+
+TELEGRAM_BOT_TOKEN = '8077710238:AAGspHBTKU7U0s_rxa0z64GhGiKvUMToadc'
+TELEGRAM_CHAT_ID = '7404406560'
+
 @app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 def telegram_webhook():
     data = request.get_json()
