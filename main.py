@@ -11,8 +11,8 @@ from sklearn.model_selection import train_test_split
 from keep_alive import keep_alive
 
 # ==== CONFIG ====
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN = '8077710238:AAGspHBTKU7U0s_rxa0z64GhGiKvUMToadc'
+TELEGRAM_CHAT_ID = '7404406560'
 features = ['RSI', 'EMA9', 'EMA21', 'MACD', 'MACD_Signal']
 assets = {
     'crypto': ['BTC-USD', 'ETH-USD', 'SOL-USD'],
