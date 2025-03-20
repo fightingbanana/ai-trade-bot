@@ -12,7 +12,7 @@ from keep_alive import keep_alive
 
 # ==== CONFIG ====
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")  # fallback for manual testing
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 features = ['RSI', 'EMA9', 'EMA21', 'MACD', 'MACD_Signal']
 assets = {
     'crypto': ['BTC-USD', 'ETH-USD', 'SOL-USD'],
@@ -21,31 +21,38 @@ assets = {
     'forex': ['GBPJPY=X', 'EURUSD=X', 'USDJPY=X']
 }
 interval_minutes = 30
-last_signals = {}
 models = {}
 
-# ==== Flask Web Server ====
+# ==== FLASK ====
 app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "✅ Bot is running."
 
-@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=['POST'])
+@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 def telegram_webhook():
     data = request.get_json()
-    if "message" in data and "text" in data["message"]:
+    if "message" in data:
         chat_id = data["message"]["chat"]["id"]
-        text = data["message"]["text"]
-        handle_command(text, chat_id)
+        text = data["message"].get("text", "")
+        if text:
+            handle_command(text, chat_id)
+    elif "callback_query" in data:
+        callback = data["callback_query"]
+        chat_id = callback["message"]["chat"]["id"]
+        data_clicked = callback["data"]
+        handle_command(data_clicked, chat_id)
     return "ok", 200
 
-def send_telegram_message(message, chat_id=TELEGRAM_CHAT_ID):
+def send_telegram_message(message, chat_id=TELEGRAM_CHAT_ID, buttons=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    data = {'chat_id': chat_id, 'text': message}
-    requests.post(url, data=data)
+    payload = {'chat_id': chat_id, 'text': message}
+    if buttons:
+        payload['reply_markup'] = json.dumps({"inline_keyboard": buttons})
+    requests.post(url, data=payload)
 
-# ==== Trading Logic ====
+# ==== TRADING LOGIC ====
 def fetch_data(ticker):
     long_assets = ['GC=F', 'CL=F']
     period = '30d' if ticker in long_assets else '7d'
@@ -79,7 +86,7 @@ def label_data(df):
 def train_model_for(ticker):
     df = fetch_data(ticker)
     if df.empty:
-        return None
+        return None, None
     df = compute_indicators(df)
     df = label_data(df)
     X = df[features]
@@ -108,64 +115,69 @@ Trend: {trend}
 RSI: {rsi}
 """
 
-# ==== Command Handler ====
+# ==== COMMAND HANDLER ====
 def handle_command(text, chat_id):
-    text = text.strip().lower()
+    text = text.lower().strip()
 
-    if text.startswith("/crypto"):
-        for sym in assets['crypto']:
-            model, df = train_model_for(sym)
-            if model: msg = f"📈 {sym}\n{get_prediction(model, df)}"
-            else: msg = f"⚠️ No data for {sym}"
-            send_telegram_message(msg, chat_id)
+    if text in ["/start", "/help"]:
+        send_telegram_message(
+            "🤖 Choose an asset category:",
+            chat_id,
+            buttons=[
+                [{"text": "💸 Crypto", "callback_data": "/crypto"}],
+                [{"text": "📈 Stocks", "callback_data": "/stocks"}],
+                [{"text": "🛢️ Commodities", "callback_data": "/commodities"}],
+                [{"text": "ℹ️ Info (type /info <symbol>)", "callback_data": "/help"}],
+            ],
+        )
+        return
 
-    elif text.startswith("/stocks"):
-        for sym in assets['stocks']:
-            model, df = train_model_for(sym)
-            if model: msg = f"📈 {sym}\n{get_prediction(model, df)}"
-            else: msg = f"⚠️ No data for {sym}"
-            send_telegram_message(msg, chat_id)
-
-    elif text.startswith("/commodities"):
-        for sym in assets['commodities']:
-            model, df = train_model_for(sym)
-            if model: msg = f"🛢️ {sym}\n{get_prediction(model, df)}"
-            else: msg = f"⚠️ No data for {sym}"
-            send_telegram_message(msg, chat_id)
-
+    if text.startswith("/crypto") or text == "crypto":
+        symbols = assets['crypto']
+    elif text.startswith("/stocks") or text == "stocks":
+        symbols = assets['stocks']
+    elif text.startswith("/commodities") or text == "commodities":
+        symbols = assets['commodities']
     elif text.startswith("/info"):
         parts = text.split()
-        if len(parts) >= 2:
-            sym = parts[1].upper()
-            model, df = train_model_for(sym)
+        if len(parts) == 2:
+            symbol = parts[1].upper()
+            model, df = train_model_for(symbol)
             if model:
-                msg = f"📊 {sym} Info\n{get_prediction(model, df)}"
+                msg = f"📊 {symbol}\n{get_prediction(model, df)}"
             else:
-                msg = f"⚠️ No data available for {sym}"
+                msg = f"⚠️ No data for {symbol}"
             send_telegram_message(msg, chat_id)
         else:
             send_telegram_message("⚠️ Usage: /info <symbol>", chat_id)
-
+        return
     else:
-        send_telegram_message("🤖 Commands:\n/crypto\n/stocks\n/commodities\n/info <symbol>", chat_id)
+        send_telegram_message("⚠️ Unknown command. Type /start to see options.", chat_id)
+        return
 
-# ==== Background Worker (optional) ====
+    for symbol in symbols:
+        model, df = train_model_for(symbol)
+        if model:
+            msg = f"📊 {symbol}\n{get_prediction(model, df)}"
+        else:
+            msg = f"⚠️ No data for {symbol}"
+        send_telegram_message(msg, chat_id)
+
+# ==== BACKGROUND WORKER ====
 def background_refresh():
     while True:
         print("🔄 Background refresh running...")
-        all_symbols = sum(assets.values(), [])
-        for symbol in all_symbols:
-            try:
-                model, df = train_model_for(symbol)
-                if model:
-                    models[symbol] = (model, df)
-                    print(f"✅ Updated model for {symbol}")
-            except Exception as e:
-                print(f"⚠️ Error refreshing {symbol}: {e}")
-        print(f"⏳ Sleeping for {interval_minutes} mins...\n")
+        for category in assets:
+            for symbol in assets[category]:
+                try:
+                    model, df = train_model_for(symbol)
+                    if model:
+                        models[symbol] = (model, df)
+                        print(f"✅ Updated model for {symbol}")
+                except Exception as e:
+                    print(f"⚠️ Error updating {symbol}: {e}")
         time.sleep(interval_minutes * 60)
 
 # ==== RUN ====
 keep_alive()
 Thread(target=background_refresh).start()
-
