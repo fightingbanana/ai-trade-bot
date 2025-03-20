@@ -13,17 +13,20 @@ TELEGRAM_CHAT_ID = '7404406560'
 @app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 def telegram_webhook():
     data = request.get_json()
+    print("📥 Received Telegram update:", data)
+
     if "message" in data:
         chat_id = data["message"]["chat"]["id"]
         text = data["message"].get("text", "")
-        if text:
-            handle_command(text, chat_id)
-    elif "callback_query" in data:
-        callback = data["callback_query"]
-        chat_id = callback["message"]["chat"]["id"]
-        data_clicked = callback["data"]
-        handle_command(data_clicked, chat_id)
-    return "ok", 200
+
+        reply = "👋 Hello! I'm your trading bot.\nType /signals to get the latest signals."
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={
+            "chat_id": chat_id,
+            "text": reply
+        })
+
+    return "OK", 200
+
 
 from threading import Thread
 from sklearn.ensemble import RandomForestClassifier
