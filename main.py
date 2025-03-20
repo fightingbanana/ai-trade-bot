@@ -19,6 +19,7 @@ assets = [
 ]
 
 interval_minutes = 30
+last_signals = {}
 
 print("✅ Bot has started successfully.")
 
@@ -90,14 +91,26 @@ while True:
             model = train_model(df)
             signal = get_signal(model, df)
 
+            # ✅ Signal Filtering Logic
+            confidence_raw = model.predict_proba(df.iloc[[-1]][features])[0][1]
+            direction = "📈 UP" if confidence_raw >= 0.5 else "📉 DOWN"
+            confidence_final = confidence_raw if confidence_raw >= 0.5 else 1 - confidence_raw
+
+            if confidence_final < 0.75:
+                print(f"🔕 Skipping {asset}: Confidence too low ({confidence_final:.0%})")
+                continue
+
+            if asset in last_signals and last_signals[asset] == signal:
+                print(f"🔁 Skipping {asset}: No signal change ({signal})")
+                continue
+
+            last_signals[asset] = signal  # Update memory
+
+            # 💬 Build and send the Telegram message
             latest_price = df['close'].iloc[-1]
             rsi = round(df['RSI'].iloc[-1], 2)
             macd = round(df['MACD'].iloc[-1], 4)
             macd_signal = round(df['MACD_Signal'].iloc[-1], 4)
-
-            confidence_raw = model.predict_proba(df.iloc[[-1]][features])[0][1]
-            direction = "📈 UP" if confidence_raw >= 0.5 else "📉 DOWN"
-            confidence_final = confidence_raw if confidence_raw >= 0.5 else 1 - confidence_raw
             trend = "📈 Bullish" if macd > macd_signal else "📉 Bearish"
 
             message = f"""
@@ -120,4 +133,5 @@ RSI: {rsi}
 
     print(f"🕒 Sleeping for {interval_minutes} minutes...\n")
     time.sleep(interval_minutes * 60)
+
 
